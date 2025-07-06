@@ -1,0 +1,18 @@
+version: '3.4'
+services:
+  weaviate:
+    image: semitechnologies/weaviate:latest
+    port: 
+      - "8880:8080"
+    environment:
+      - QUERY_DEFAULTS_LIMIT=25
+      - AUTHENTICATION_ANONYMOUS_ACCESS_ENABLES=true  
+      - PERSISTENCE_DATA_PATH=/var/lib/weaviate
+      - DEFAULT_VECTORIZER_MODULE=none
+      - ENABLE_MODULES=text2vec-transformers
+      - TRANSFORMERS_INFERENCE_API=http://transformers:8080
+
+    transformers:
+      image: semitechnologies/transformers-inference:sentence-transformers-all-MiniLM-L6-v2
+      ports:
+      - "8000:8080"  
