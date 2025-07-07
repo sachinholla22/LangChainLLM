@@ -1,55 +1,55 @@
-from fastapi import FastApi,Request
+from fastapi import FastAPI
 from pydantic import BaseModel
-from langchain.embeddings import HuggingFaceEmbeddings
+import faiss
+import numpy as np
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_mistralai.chat_models import ChatMistralAI
-from  langchain_core.messages import HumanMessage
-import weaviate
+import pickle
+import os
 
-app=FastApi()
+app = FastAPI()
 
-weaviate_client=weaviate.Client("http://localhost:8880")
+# Initialize models
+embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
-#embedding Model
+llm = ChatMistralAI(api_key="")
+# Load Faiss index and metadata
+try:
+    index = faiss.read_index("research_doc_index.faiss")
+    with open("research_doc_metadata.pkl", "rb") as f:
+        metadata = pickle.load(f)
+except Exception as e:
+    raise Exception(f"Failed to load Faiss index or metadata: {e}")
 
-embedding_model=HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-
-# LLM model (use your key and model name)
-llm = ChatMistralAI(api_key="your-mistral-api-key", model="mistral-tiny")
-
-# Request input model
-class PromptRequest(BaseModel):
+class Query(BaseModel):
     input: str
 
-# Response model
-class PromptResponse(BaseModel):
-    response: str
-    isResearchRelated: bool
+@app.post("/q")
+async def query_endpoint(query: Query):
+    try:
+        # Embed query
+        query_embedding = embedding_model.embed_query(query.input)
+        query_embedding = np.array([query_embedding], dtype=np.float32)
 
-@app.post("/q",response_model=PromptResponse)
-def generate_response(request:PromptResponse):
-    user_prompt = request.input  
-    query_vector=embedding_model.embed_query(user_prompt)
+        # Search Faiss index
+        k = 5  # Top 5 results
+        distances, indices = index.search(query_embedding, k)
+        contexts = [metadata[i]["text"] for i in indices[0]]
 
-    #Search Weaviate
-    results=weaviate_client.query.get("ResearchDoc",["text"])\
-        .with_near_vector({"vector":query_vector})\
-        .with_limit(3).do()
-    
+        # Prepare prompt for Mistral AI
+        context_str = "\n".join(contexts)
+        prompt = f"Context:\n{context_str}\n\nQuestion: {query.input}\nAnswer:"
+        
+        # Query Mistral AI
+        response = llm.invoke(prompt).content
 
-    docs = results.get("data", {}).get("Get", {}).get("ResearchDoc", [])
+        # Determine if research-related
+        is_research_related = any("squad" in meta["source"] for meta in [metadata[i] for i in indices[0]])
 
-    if not docs:
-        return PromptResponse(
-            response="👋 Hello! I'm a research assistant. Please ask a research-related question or upload a research document.",
-            isResearchRelated=False
-        )
-    
-     # Join top matches as context
-    context = "\n".join([doc["text"] for doc in docs])
-
-    full_prompt = f"Context:\n{context}\n\nUser Question: {user_prompt}"
-
-    # Ask the LLM
-    response = llm.invoke([HumanMessage(content=full_prompt)])
-
-    return PromptResponse(response=response.content, isResearchRelated=True)
+        return {
+            "response": response,
+            "isResearchRelated": is_research_related,
+            "input": query.input
+        }
+    except Exception as e:
+        return {"error": f"Query failed: {str(e)}"}

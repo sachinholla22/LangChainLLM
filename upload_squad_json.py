@@ -1,28 +1,77 @@
+import faiss
+import numpy as np
+from langchain_huggingface import HuggingFaceEmbeddings
 import json
-import weaviate
-from langchain.embeddings import HuggingFaceEmbeddings
+import pickle
+import os
 
-client = weaviate.Client("http://localhost:8880")
+# Initialize embedding model
 embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
-with open("data/dev-v1.1.json", "r", encoding="utf-8") as f:
-    squad_data = json.load(f)
+# Load Faiss index
+try:
+    index = faiss.read_index("research_doc_index.faiss")
+except Exception as e:
+    print(f"Error loading Faiss index: {e}")
+    exit(1)
 
-for article in squad_data["data"]:
-    for para in article["paragraphs"]:
-        context = para["context"]
-        for qa in para["qas"]:
-            question = qa["question"]
-            answers = qa["answers"]
-            answer_text = answers[0]["text"] if answers else ""
-            
-            full_text = f"Q: {question}\nA: {answer_text}\nContext: {context}"
+# Load existing metadata or initialize
+try:
+    with open("research_doc_metadata.pkl", "rb") as f:
+        metadata = pickle.load(f)
+except FileNotFoundError:
+    metadata = []
 
-            embedding = embedding_model.embed_query(full_text)
-            client.data_object.create(
-                data_object={"text": full_text},
-                class_name="ResearchDoc",
-                vector=embedding
-            )
+# Load SQuAD data
+squad_file = "data/dev-v1.1.json"
+if not os.path.exists(squad_file):
+    print(f"Error: {squad_file} not found. Please ensure it exists in the data/ directory.")
+    exit(1)
 
-print("✅ SQuAD JSON data uploaded to Weaviate!")
+try:
+    with open(squad_file, "r") as f:
+        squad_data = json.load(f)
+except Exception as e:
+    print(f"Error loading {squad_file}: {e}")
+    exit(1)
+
+# Extract contexts
+texts = []
+new_metadata = []
+try:
+    for data in squad_data["data"]:
+        for paragraph in data["paragraphs"]:
+            context = paragraph["context"]
+            texts.append(context)
+            new_metadata.append({"text": context, "source": "squad"})
+except Exception as e:
+    print(f"Error processing SQuAD data: {e}")
+    exit(1)
+
+# Generate embeddings
+try:
+    embeddings = embedding_model.embed_documents(texts)
+    embeddings = np.array(embeddings, dtype=np.float32)
+except Exception as e:
+    print(f"Error generating embeddings: {e}")
+    exit(1)
+
+# Add to Faiss index
+try:
+    index.add(embeddings)
+except Exception as e:
+    print(f"Error adding to Faiss index: {e}")
+    exit(1)
+
+# Update metadata
+metadata.extend(new_metadata)
+
+# Save updated index and metadata
+try:
+    faiss.write_index(index, "research_doc_index.faiss")
+    with open("research_doc_metadata.pkl", "wb") as f:
+        pickle.dump(metadata, f)
+    print("SQuAD data uploaded to Faiss index.")
+except Exception as e:
+    print(f"Error saving index or metadata: {e}")
+    exit(1)
