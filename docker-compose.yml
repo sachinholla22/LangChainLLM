@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 services:
   redis:
     image: redis:7.0
@@ -12,3 +13,32 @@ volumes:
 networks:
   lumina_net:
     driver: bridge
+=======
+version: "3.8"
+services:
+  weaviate:
+    image: cr.weaviate.io/semitechnologies/weaviate:1.26.1
+    ports:
+      - "8880:8080"
+      - "50051:50051"
+    restart: always
+    environment:
+      QUERY_DEFAULTS_LIMIT: 25
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: 'true'
+      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
+      DEFAULT_VECTORIZER_MODULE: "none"
+      ENABLE_MODULES: ""
+      ENABLE_API_GRPC: "true"
+      CLUSTER_HOSTNAME: "weaviate-node"
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+  redis:
+    image: redis:7.0
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+volumes:
+  weaviate_data:
+  redis_data:
+>>>>>>> 000edc16f6ba5c64e265cfbaf3d526925b71196e
