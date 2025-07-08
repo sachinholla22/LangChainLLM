@@ -1,63 +1,38 @@
-<<<<<<< HEAD
 import faiss
-import numpy as np
-from langchain_huggingface import HuggingFaceEmbeddings
 import pickle
+from langchain_huggingface import HuggingFaceEmbeddings
+import numpy as np
 
-# Initialize embedding model
-embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+def upload_static_data():
+    try:
+        # Initialize embedding model
+        embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        
+        # Static data
+        texts = [
+            "LangChain is a framework for developing applications powered by language models.",
+            "AI CI/CD automates the development, testing, and deployment of AI models."
+        ]
+        metadata = [{"text": t, "source": "static"} for t in texts]  # Use 't' to avoid 'text' scope issues
+        
+        # Embed texts
+        embeddings = embedding_model.embed_documents(texts)
+        embeddings = np.array(embeddings, dtype=np.float32)
+        
+        # Load Faiss index
+        index = faiss.read_index("research_doc_index.faiss")
+        
+        # Add embeddings to index
+        index.add(embeddings)
+        
+        # Save updated index and metadata
+        faiss.write_index(index, "research_doc_index.faiss")
+        with open("research_doc_metadata.pkl", "wb") as f:
+            pickle.dump(metadata, f)
+        
+        print("Static data uploaded to Faiss index.")
+    except Exception as e:
+        print(f"Error uploading static data: {e}")
 
-# Load Faiss index
-index = faiss.read_index("research_doc_index.faiss")
-
-# Static texts
-texts = [
-    "LangChain is a framework for developing applications powered by language models.",
-    "Faiss is an open-source library for efficient similarity search and clustering of dense vectors."
-]
-metadata = [
-    {"text": text, "source": "static"} for text in texts
-]
-
-# Generate embeddings
-embeddings = embedding_model.embed_documents(texts)
-embeddings = np.array(embeddings, dtype=np.float32)
-
-# Add to Faiss index
-index.add(embeddings)
-
-# Save updated index
-faiss.write_index(index, "research_doc_index.faiss")
-
-# Save metadata
-with open("research_doc_metadata.pkl", "wb") as f:
-    pickle.dump(metadata, f)
-
-print("Static data uploaded to Faiss index.")
-=======
-import weaviate
-from langchain.embeddings import HuggingFaceEmbeddings
-
-client = weaviate.connect_to_local(port=8880, skip_init_checks=True)
-embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-
-try:
-    texts = [
-        "Spring Boot is used to build microservices and REST APIs in Java.",
-        "LangChain enables chaining of LLMs with memory and tools.",
-        "Vector databases like Weaviate store and search embeddings based on similarity.",
-        "React is a frontend JavaScript library for building user interfaces.",
-        "PDF documents can be used as sources for research QA systems."
-    ]
-    collection = client.collections.get("ResearchDoc")
-    with collection.batch.dynamic() as batch:
-        for text in texts:
-            embedding = embedding_model.embed_query(text)
-            batch.add_object(
-                properties={"text": text, "source": "Static"},
-                vector=embedding
-            )
-    print("✅ Uploaded research docs to Weaviate")
-finally:
-    client.close()
->>>>>>> 000edc16f6ba5c64e265cfbaf3d526925b71196e
+if __name__ == "__main__":
+    upload_static_data()
