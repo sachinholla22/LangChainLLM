@@ -50,10 +50,13 @@ async def query_endpoint(query: Query):
         # Query Mistral AI
         response = llm.invoke(prompt).content
 
-        # Store research-related prompt in Faiss
+        # Store research-related prompt + response
         if is_research_related:
             index.add(query_embedding)
-            metadata.append({"text": query.input, "source": "user_query"})
+            metadata.append({
+                "text": f"Q: {query.input}\nA: {response}",
+                "source": "user_query"
+            })
             faiss.write_index(index, "research_doc_index.faiss")
             with open("research_doc_metadata.pkl", "wb") as f:
                 pickle.dump(metadata, f)
@@ -61,7 +64,6 @@ async def query_endpoint(query: Query):
         return {
             "response": response,
             "isResearchRelated": is_research_related
-            
         }
     except Exception as e:
         return {"error": f"Query failed: {str(e)}"}
