@@ -2,13 +2,14 @@ import faiss
 import pickle
 import json
 import os
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 import numpy as np
 
 def upload_squad_data():
     try:
         # Initialize embedding model
-        embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
+
         
         # Load SQuAD data
         squad_file = "data/dev-v1.1.json"
