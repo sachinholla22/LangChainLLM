@@ -2,115 +2,139 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import faiss
 import numpy as np
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_mistralai.chat_models import ChatMistralAI
 import pickle
 import os
+import json
 import datetime
-from transformers import pipeline
 from dotenv import load_dotenv
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_mistralai.chat_models import ChatMistralAI
+from transformers import pipeline
 
-# Track the last research-related prompt per user
-user_last_queries = {}
-
-# Initialize classifier
-classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
 app = FastAPI()
 
-# Initialize models
-embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+# === Load environment ===
 load_dotenv()
 api_key = os.getenv("MISTRAL_API_KEY")
+
+# === Initialize models ===
+embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 llm = ChatMistralAI(api_key=api_key)
+classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
 
-# Load Faiss index and metadata
-try:
-    index = faiss.read_index("research_doc_index.faiss")
-    with open("research_doc_metadata.pkl", "rb") as f:
+# === Categories for research classification ===
+CATEGORIES = ["technical_explanation", "research", "non_technical", "casual_talk", "joke"]
+
+# === Load or create FAISS index ===
+dimension = 384  # for MiniLM
+index_path = "research_doc_index.faiss"
+meta_path = "research_doc_metadata.pkl"
+debug_path = "debug_vectors.json"
+
+if os.path.exists(index_path):
+    index = faiss.read_index(index_path)
+    with open(meta_path, "rb") as f:
         metadata = pickle.load(f)
-except Exception as e:
-    raise Exception(f"Failed to load Faiss index or metadata: {e}")
+else:
+    index = faiss.IndexFlatIP(dimension)
+    metadata = []
 
-CATEGORIES = [
-    "technical_explanation", "research", "general_greeting",
-    "casual_talk", "joke", "non_technical"
-]
-def is_research_prompt(text: str) -> bool:
-    result = classifier(text, CATEGORIES)
-    top_labels = result["labels"][:3]  # Consider top 3 labels
-    return any(label in ["technical_explanation", "research"] for label in top_labels)
+# === Load or init debug vector log ===
+if os.path.exists(debug_path):
+    with open(debug_path, "r") as f:
+        debug_vectors = json.load(f)
+else:
+    debug_vectors = []
 
+# === Session memory ===
+user_last_queries = {}
 
-def is_generic_followup(text: str) -> bool:
-    generic_phrases = [
-        "more details", "elaborate", "continue", "go on", "further info", 
-        "explain more", "more explanation", "brief more", "add more"
-    ]
-    return text.strip().lower() in generic_phrases
-
+# === Input schema ===
 class Query(BaseModel):
     id: int
     input: str
 
+# === Helper: Research query check ===
+def is_research_prompt(text: str) -> bool:
+    result = classifier(text, CATEGORIES)
+    top_labels = result["labels"][:3]
+    return any(label in ["technical_explanation", "research"] for label in top_labels)
+
+# === Helper: Generic follow-up checker ===
+def is_generic_followup(text: str) -> bool:
+    followups = ["more", "continue", "elaborate", "go on", "further"]
+    return any(p in text.lower() for p in followups)
+
+# === Main endpoint ===
 @app.post("/q")
 async def query_endpoint(query: Query):
     try:
         input_text = query.input.strip()
 
-        # Replace vague input with last query if needed
+        # Handle vague input
         if is_generic_followup(input_text) and query.id in user_last_queries:
             input_text = user_last_queries[query.id] + "\n" + input_text
 
-        # Detect research-type query
-        is_research_related = is_research_prompt(input_text)
-        
-        # If not research-related, return static message immediately
-        if not is_research_related:
-        
+        # Validate research relevance
+        if not is_research_prompt(input_text):
             return {
-                "response": "👋 Hi! I'm your research assistant. Please ask queries related to research, technical topics, or learning content so I can assist you better.",
-                "isResearchRelated": False
+                "response": "👋 I'm here to help with research and technical queries. Please try asking something tech-related.",
+                "isResearchRelated": False,
+                "isInVector": False
             }
-        # Embed and search
-        query_embedding = embedding_model.embed_query(input_text)
-        query_embedding = np.array([query_embedding], dtype=np.float32)
-        distances, indices = index.search(query_embedding, 5)
-        contexts = [metadata[i]["text"] for i in indices[0]]
-        context_str = "\n".join(contexts)
 
-        # Ask Mistral
-        prompt = f"Context:\n{context_str}\n\nQuestion: {query.input}\nAnswer:"
+        # === Embed query ===
+        query_embedding = embedding_model.embed_query(input_text)
+        query_embedding_np = np.array([query_embedding], dtype=np.float32)
+
+        # === Search in FAISS ===
+        k = 3
+        distances, indices = index.search(query_embedding_np, k)
+
+        matched_contexts = []
+        isInVector = False
+        for i, dist in zip(indices[0], distances[0]):
+            if i >= 0 and dist > 0.75 and i < len(metadata):
+                matched_contexts.append(metadata[i]["text"])
+                isInVector = True  # mark as found in vector
+
+        # === If not found, ask directly ===
+        if matched_contexts:
+            context_str = "\n".join(matched_contexts)
+            prompt = f"Context:\n{context_str}\n\nQuestion: {input_text}\nAnswer:"
+        else:
+            prompt = f"Answer the following technical question:\n\n{input_text}\nAnswer:"
+
+        # === LLM Response ===
         response = llm.invoke(prompt).content
 
-        # Save to vector DB + session
-        if is_research_related:
-            index.add(query_embedding)
-            metadata.append({
-                "text": f"Q: {input_text}\nA: {response}",
-                "source": "user_query",
-                "user": str(query.id),
-                "date": str(datetime.datetime.now())
-            })
-            faiss.write_index(index, "research_doc_index.faiss")
-            with open("research_doc_metadata.pkl", "wb") as f:
-                pickle.dump(metadata, f)
+        # === Save vector, metadata, debug ===
+        index.add(query_embedding_np)
+        metadata.append({
+            "text": f"Q: {input_text}\nA: {response}",
+            "source": "user_query",
+            "user": str(query.id),
+            "date": str(datetime.datetime.now())
+        })
+        debug_vectors.append({
+            "query": input_text,
+            "vector": list(map(float, query_embedding))  # convert to plain float list
+        })
 
-            # 🔥 ADD THIS LINE for session memory:
-            user_last_queries[query.id] = input_text
+        # === Save to disk ===
+        faiss.write_index(index, index_path)
+        with open(meta_path, "wb") as f:
+            pickle.dump(metadata, f)
+        with open(debug_path, "w") as f:
+            json.dump(debug_vectors, f, indent=2)
+
+        user_last_queries[query.id] = input_text
 
         return {
             "response": response,
-            "isResearchRelated": is_research_related
+            "isResearchRelated": True,
+            "isInVector": isInVector
         }
-        
-        # If not research-related, send static message
-        if not is_research_related:
-             return {
-                 "response": "👋 Hi! I'm your research assistant. Please ask queries related to research, technical topics, or learning content so I can assist you better.",
-                 "isResearchRelated": False
-             }
-
-
 
     except Exception as e:
-        return {"error": f"Query failed: {str(e)}"}
+        return {"error": f"Query failed: {str(e)}"} 

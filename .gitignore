@@ -2,3 +2,6 @@
 
 __pycache__/
 *.pyc
+
+debug_vectors.json
+__pycache__/app.cpython-312.pyc

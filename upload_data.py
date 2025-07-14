@@ -1,38 +1,43 @@
 import faiss
 import pickle
-from langchain_huggingface import HuggingFaceEmbeddings
 import numpy as np
+import os
+from langchain_huggingface import HuggingFaceEmbeddings
 
-def upload_static_data():
-    try:
-        # Initialize embedding model
-        embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        
-        # Static data
-        texts = [
-            "LangChain is a framework for developing applications powered by language models.",
-            "AI CI/CD automates the development, testing, and deployment of AI models."
-        ]
-        metadata = [{"text": t, "source": "static"} for t in texts]  # Use 't' to avoid 'text' scope issues
-        
-        # Embed texts
-        embeddings = embedding_model.embed_documents(texts)
-        embeddings = np.array(embeddings, dtype=np.float32)
-        
-        # Load Faiss index
-        index = faiss.read_index("research_doc_index.faiss")
-        
-        # Add embeddings to index
-        index.add(embeddings)
-        
-        # Save updated index and metadata
-        faiss.write_index(index, "research_doc_index.faiss")
-        with open("research_doc_metadata.pkl", "wb") as f:
-            pickle.dump(metadata, f)
-        
-        print("Static data uploaded to Faiss index.")
-    except Exception as e:
-        print(f"Error uploading static data: {e}")
+# === New static texts to embed ===
+texts = [
+    "LangChain helps build LLM-based applications with context and memory.",
+    "CI/CD stands for Continuous Integration and Continuous Deployment.",
+    "Docker is used to containerize applications for portability.",
+    "RCB won the IPL cup in 2025."
+]
 
-if __name__ == "__main__":
-    upload_static_data()
+# === Embed the texts ===
+embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+vectors = embedding_model.embed_documents(texts)
+vectors = np.array(vectors, dtype=np.float32)
+
+# === File paths ===
+index_path = "research_doc_index.faiss"
+meta_path = "research_doc_metadata.pkl"
+dimension = 384  # for all-MiniLM-L6-v2
+
+# === Load existing index or create new ===
+if os.path.exists(index_path):
+    index = faiss.read_index(index_path)
+    with open(meta_path, "rb") as f:
+        metadata = pickle.load(f)
+else:
+    index = faiss.IndexFlatIP(dimension)
+    metadata = []
+
+# === Append vectors and metadata ===
+index.add(vectors)
+metadata += [{"text": t, "source": "static"} for t in texts]
+
+# === Save updated index and metadata ===
+faiss.write_index(index, index_path)
+with open(meta_path, "wb") as f:
+    pickle.dump(metadata, f)
+
+print("✅ Static data appended to FAISS index and metadata")
