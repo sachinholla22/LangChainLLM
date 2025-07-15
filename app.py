@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_mistralai.chat_models import ChatMistralAI
 from transformers import pipeline
+import asyncio
+import platform
 
 app = FastAPI()
 
@@ -48,6 +50,16 @@ else:
 
 # === Session memory ===
 user_last_queries = {}
+session_titles_file = "session_titles.json"
+if os.path.exists(session_titles_file):
+    with open(session_titles_file, "r") as f:
+        session_titles = json.load(f)
+else:
+    session_titles = {}
+
+def save_session_titles():
+    with open(session_titles_file, "w") as f:
+        json.dump(session_titles, f, indent=2)
 
 # === Input schema ===
 class Query(BaseModel):
@@ -65,22 +77,30 @@ def is_generic_followup(text: str) -> bool:
     followups = ["more", "continue", "elaborate", "go on", "further"]
     return any(p in text.lower() for p in followups)
 
+# === Helper: Extract smart session title ===
+def extract_session_title(input_text: str) -> str:
+    # Simple extraction: first 2-3 meaningful words, avoiding emails or junk
+    words = [w for w in input_text.lower().split() if not any(c in w for c in "@._")][:3]  # Exclude email-like chars
+    return " ".join(words[:2]) if words else "Untitled_Session"
+
 # === Main endpoint ===
 @app.post("/q")
 async def query_endpoint(query: Query):
     try:
         input_text = query.input.strip()
+        session_id = query.id
 
         # Handle vague input
-        if is_generic_followup(input_text) and query.id in user_last_queries:
-            input_text = user_last_queries[query.id] + "\n" + input_text
+        if is_generic_followup(input_text) and session_id in user_last_queries:
+            input_text = user_last_queries[session_id] + "\n" + input_text
 
         # Validate research relevance
         if not is_research_prompt(input_text):
             return {
                 "response": "👋 I'm here to help with research and technical queries. Please try asking something tech-related.",
                 "isResearchRelated": False,
-                "isInVector": False
+                "isInVector": False,
+                "sessionTitle": session_titles.get(str(session_id), extract_session_title(input_text))
             }
 
         # === Embed query ===
@@ -108,6 +128,14 @@ async def query_endpoint(query: Query):
         # === LLM Response ===
         response = llm.invoke(prompt).content
 
+        # === Set session title only for the first prompt ===
+        if str(session_id) not in session_titles:
+            session_titles[str(session_id)] = extract_session_title(input_text)
+            save_session_titles()
+
+        # Fallback to current input if no title set
+        current_session_title = session_titles.get(str(session_id), extract_session_title(input_text))
+
         # === Save vector, metadata, debug ===
         index.add(query_embedding_np)
         metadata.append({
@@ -133,8 +161,15 @@ async def query_endpoint(query: Query):
         return {
             "response": response,
             "isResearchRelated": True,
-            "isInVector": isInVector
+            "isInVector": isInVector,
+            "sessionTitle": current_session_title
         }
 
     except Exception as e:
         return {"error": f"Query failed: {str(e)}"} 
+
+if platform.system() == "Emscripten":
+    asyncio.ensure_future(main())
+else:
+    if __name__ == "__main__":
+        asyncio.run(main())
