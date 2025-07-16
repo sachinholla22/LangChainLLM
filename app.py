@@ -77,18 +77,30 @@ def is_generic_followup(text: str) -> bool:
     followups = ["more", "continue", "elaborate", "go on", "further"]
     return any(p in text.lower() for p in followups)
 
-# === Helper: Extract smart session title ===
+# === Helper: Extract smart session title from input only ===
 def extract_session_title(input_text: str) -> str:
-    # Simple extraction: first 2-3 meaningful words, avoiding emails or junk
-    words = [w for w in input_text.lower().split() if not any(c in w for c in "@._")][:3]  # Exclude email-like chars
-    return " ".join(words[:2]) if words else "Untitled_Session"
+    # Debug what we're processing
+   
+    print(f"RAW Query Object: {query}")
+    print(f"Extracting title from input_text: {input_text}")
+
+    # Ensure we only process the input string, not JSON
+    if isinstance(input_text, str):
+        words = [w for w in input_text.lower().split() if not any(c in w for c in "@._") and w not in ["in", "with", "by"]]
+        if not words:
+            return "Untitled_Session"
+        if len(words) > 1 and words[0] in ["explain", "describe", "tell"]:
+            return f"{words[1]} {words[0]}tion"
+        return " ".join(words[:2]) + " session"
+    return "Invalid_Input_Session"
 
 # === Main endpoint ===
 @app.post("/q")
 async def query_endpoint(query: Query):
     try:
-        input_text = query.input.strip()
+        input_text = query.input.strip()  # Explicitly use the parsed input
         session_id = query.id
+        print(input_text)
 
         # Handle vague input
         if is_generic_followup(input_text) and session_id in user_last_queries:
@@ -116,14 +128,14 @@ async def query_endpoint(query: Query):
         for i, dist in zip(indices[0], distances[0]):
             if i >= 0 and dist > 0.75 and i < len(metadata):
                 matched_contexts.append(metadata[i]["text"])
-                isInVector = True  # mark as found in vector
+                isInVector = True
 
-        # === If not found, ask directly ===
+        # === Construct prompt with only input_text ===
         if matched_contexts:
             context_str = "\n".join(matched_contexts)
             prompt = f"Context:\n{context_str}\n\nQuestion: {input_text}\nAnswer:"
         else:
-            prompt = f"Answer the following technical question:\n\n{input_text}\nAnswer:"
+            prompt = f"Question: {input_text}\nAnswer:"
 
         # === LLM Response ===
         response = llm.invoke(prompt).content
@@ -146,7 +158,7 @@ async def query_endpoint(query: Query):
         })
         debug_vectors.append({
             "query": input_text,
-            "vector": list(map(float, query_embedding))  # convert to plain float list
+            "vector": list(map(float, query_embedding))
         })
 
         # === Save to disk ===
@@ -166,7 +178,7 @@ async def query_endpoint(query: Query):
         }
 
     except Exception as e:
-        return {"error": f"Query failed: {str(e)}"} 
+        return {"error": f"Query failed: {str(e)}"}
 
 if platform.system() == "Emscripten":
     asyncio.ensure_future(main())
