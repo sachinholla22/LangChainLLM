@@ -81,8 +81,6 @@ def is_generic_followup(text: str) -> bool:
 def extract_session_title(input_text: str) -> str:
     # Debug what we're processing
    
-    print(f"RAW Query Object: {query}")
-    print(f"Extracting title from input_text: {input_text}")
 
     # Ensure we only process the input string, not JSON
     if isinstance(input_text, str):
