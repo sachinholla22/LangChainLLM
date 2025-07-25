@@ -5,6 +5,7 @@ import numpy as np
 import pickle
 import os
 import json
+import hashlib
 import datetime
 from dotenv import load_dotenv
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -24,31 +25,9 @@ embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 llm = ChatMistralAI(api_key=api_key)
 classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
 
-# === Categories for research classification ===
 CATEGORIES = ["technical_explanation", "research", "non_technical", "casual_talk", "joke"]
 
-# === Load or create FAISS index ===
-dimension = 384  # for MiniLM
-index_path = "research_doc_index.faiss"
-meta_path = "research_doc_metadata.pkl"
-debug_path = "debug_vectors.json"
-
-if os.path.exists(index_path):
-    index = faiss.read_index(index_path)
-    with open(meta_path, "rb") as f:
-        metadata = pickle.load(f)
-else:
-    index = faiss.IndexFlatIP(dimension)
-    metadata = []
-
-# === Load or init debug vector log ===
-if os.path.exists(debug_path):
-    with open(debug_path, "r") as f:
-        debug_vectors = json.load(f)
-else:
-    debug_vectors = []
-
-# === Session memory ===
+# === Memory Stores ===
 user_last_queries = {}
 session_titles_file = "session_titles.json"
 if os.path.exists(session_titles_file):
@@ -57,32 +36,30 @@ if os.path.exists(session_titles_file):
 else:
     session_titles = {}
 
+recent_context_memory = {}      # stores up to 3 recent queries per session
+input_hash_registry = {}        # stores hashes per session to skip duplicate embeddings
+
 def save_session_titles():
     with open(session_titles_file, "w") as f:
         json.dump(session_titles, f, indent=2)
 
-# === Input schema ===
+# === Request Schema ===
 class Query(BaseModel):
-    id: int
+    user_id: int
+    id: int  # session id
     input: str
 
-# === Helper: Research query check ===
+# === Helpers ===
 def is_research_prompt(text: str) -> bool:
     result = classifier(text, CATEGORIES)
     top_labels = result["labels"][:3]
     return any(label in ["technical_explanation", "research"] for label in top_labels)
 
-# === Helper: Generic follow-up checker ===
 def is_generic_followup(text: str) -> bool:
     followups = ["more", "continue", "elaborate", "go on", "further"]
     return any(p in text.lower() for p in followups)
 
-# === Helper: Extract smart session title from input only ===
 def extract_session_title(input_text: str) -> str:
-    # Debug what we're processing
-   
-
-    # Ensure we only process the input string, not JSON
     if isinstance(input_text, str):
         words = [w for w in input_text.lower().split() if not any(c in w for c in "@._") and w not in ["in", "with", "by"]]
         if not words:
@@ -92,32 +69,79 @@ def extract_session_title(input_text: str) -> str:
         return " ".join(words[:2]) + " session"
     return "Invalid_Input_Session"
 
-# === Main endpoint ===
+def get_session_paths(user_id, session_id):
+    base_dir = "sessiondir"
+    user_dir = os.path.join(base_dir, f"user_{user_id}")
+    os.makedirs(user_dir, exist_ok=True)
+
+    faiss_path = os.path.join(user_dir, f"session_{session_id}.faiss")
+    meta_path = os.path.join(user_dir, f"session_{session_id}_meta.pkl")
+
+    return faiss_path, meta_path
+
+def load_or_create_session_index(user_id, session_id):
+    faiss_path, meta_path = get_session_paths(user_id, session_id)
+    if os.path.exists(faiss_path):
+        index = faiss.read_index(faiss_path)
+        with open(meta_path, "rb") as f:
+            metadata = pickle.load(f)
+    else:
+        index = faiss.IndexFlatIP(384)
+        metadata = []
+    return index, metadata
+
+def save_session_data(user_id, session_id, index, metadata):
+    faiss_path, meta_path = get_session_paths(user_id, session_id)
+    faiss.write_index(index, faiss_path)
+    with open(meta_path, "wb") as f:
+        pickle.dump(metadata, f)
+
+# === Endpoint ===
 @app.post("/q")
 async def query_endpoint(query: Query):
     try:
-        input_text = query.input.strip()  # Explicitly use the parsed input
+        input_text = query.input.strip()
         session_id = query.id
-        print(input_text)
+        user_id = query.user_id
 
-        # Handle vague input
-        if is_generic_followup(input_text) and session_id in user_last_queries:
-            input_text = user_last_queries[session_id] + "\n" + input_text
+        index, metadata = load_or_create_session_index(user_id, session_id)
 
-        # Validate research relevance
+        # Setup memory for session
+        session_key = f"{user_id}_{session_id}"
+        if session_key not in recent_context_memory:
+            recent_context_memory[session_key] = []
+        if session_key not in input_hash_registry:
+            input_hash_registry[session_key] = set()
+
+        # Deduplication
+        input_hash = hashlib.sha256(input_text.encode()).hexdigest()
+        if input_hash in input_hash_registry[session_key]:
+            return {
+                "response": "⚠️ You already asked this question in this session.",
+                "isResearchRelated": True,
+                "isInVector": True,
+                "sessionTitle": session_titles.get(session_key, extract_session_title(input_text))
+            }
+
+        if is_generic_followup(input_text) and session_key in user_last_queries:
+            input_text = user_last_queries[session_key] + "\n" + input_text
+
         if not is_research_prompt(input_text):
             return {
                 "response": "👋 I'm here to help with research and technical queries. Please try asking something tech-related.",
                 "isResearchRelated": False,
                 "isInVector": False,
-                "sessionTitle": session_titles.get(str(session_id), extract_session_title(input_text))
+                "sessionTitle": session_titles.get(session_key, extract_session_title(input_text))
             }
 
-        # === Embed query ===
-        query_embedding = embedding_model.embed_query(input_text)
+        # === Embed input with context chain ===
+        context_chain = "\n".join(recent_context_memory[session_key][-2:])
+        combined_input = context_chain + "\n" + input_text if context_chain else input_text
+
+        query_embedding = embedding_model.embed_query(combined_input)
         query_embedding_np = np.array([query_embedding], dtype=np.float32)
 
-        # === Search in FAISS ===
+        # === Semantic Search ===
         k = 3
         distances, indices = index.search(query_embedding_np, k)
 
@@ -128,45 +152,33 @@ async def query_endpoint(query: Query):
                 matched_contexts.append(metadata[i]["text"])
                 isInVector = True
 
-        # === Construct prompt with only input_text ===
-        if matched_contexts:
-            context_str = "\n".join(matched_contexts)
-            prompt = f"Context:\n{context_str}\n\nQuestion: {input_text}\nAnswer:"
-        else:
-            prompt = f"Question: {input_text}\nAnswer:"
-
-        # === LLM Response ===
+        # === Prompt Construction ===
+        context_str = "\n".join(matched_contexts)
+        prompt = f"Context:\n{context_str}\n\nQuestion: {input_text}\nAnswer:" if matched_contexts else f"Question: {input_text}\nAnswer:"
         response = llm.invoke(prompt).content
 
-        # === Set session title only for the first prompt ===
-        if str(session_id) not in session_titles:
-            session_titles[str(session_id)] = extract_session_title(input_text)
+        # === Save title for first time
+        if session_key not in session_titles:
+            session_titles[session_key] = extract_session_title(input_text)
             save_session_titles()
+        current_session_title = session_titles[session_key]
 
-        # Fallback to current input if no title set
-        current_session_title = session_titles.get(str(session_id), extract_session_title(input_text))
-
-        # === Save vector, metadata, debug ===
+        # Save vector + metadata
         index.add(query_embedding_np)
         metadata.append({
             "text": f"Q: {input_text}\nA: {response}",
             "source": "user_query",
-            "user": str(query.id),
+            "user": str(user_id),
             "date": str(datetime.datetime.now())
         })
-        debug_vectors.append({
-            "query": input_text,
-            "vector": list(map(float, query_embedding))
-        })
+        save_session_data(user_id, session_id, index, metadata)
 
-        # === Save to disk ===
-        faiss.write_index(index, index_path)
-        with open(meta_path, "wb") as f:
-            pickle.dump(metadata, f)
-        with open(debug_path, "w") as f:
-            json.dump(debug_vectors, f, indent=2)
-
-        user_last_queries[query.id] = input_text
+        # Memory + dedup + context
+        recent_context_memory[session_key].append(input_text)
+        if len(recent_context_memory[session_key]) > 5:
+            recent_context_memory[session_key] = recent_context_memory[session_key][-5:]
+        input_hash_registry[session_key].add(input_hash)
+        user_last_queries[session_key] = input_text
 
         return {
             "response": response,
@@ -178,6 +190,7 @@ async def query_endpoint(query: Query):
     except Exception as e:
         return {"error": f"Query failed: {str(e)}"}
 
+# === Startup (optional) ===
 if platform.system() == "Emscripten":
     asyncio.ensure_future(main())
 else:
