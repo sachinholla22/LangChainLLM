@@ -96,8 +96,7 @@ def save_session_data(user_id, session_id, index, metadata):
     with open(meta_path, "wb") as f:
         pickle.dump(metadata, f)
 
-# === Endpoint ===
-@app.post("/q")
+# === Endpoint ===@app.post("/q")
 async def query_endpoint(query: Query):
     try:
         input_text = query.input.strip()
@@ -157,23 +156,14 @@ async def query_endpoint(query: Query):
         prompt = f"Context:\n{context_str}\n\nQuestion: {input_text}\nAnswer:" if matched_contexts else f"Question: {input_text}\nAnswer:"
         response = llm.invoke(prompt).content
 
-        # === Save title for first time
+        # Save session title only (once per session)
         if session_key not in session_titles:
             session_titles[session_key] = extract_session_title(input_text)
             save_session_titles()
         current_session_title = session_titles[session_key]
 
-        # Save vector + metadata
-        index.add(query_embedding_np)
-        metadata.append({
-            "text": f"Q: {input_text}\nA: {response}",
-            "source": "user_query",
-            "user": str(user_id),
-            "date": str(datetime.datetime.now())
-        })
-        save_session_data(user_id, session_id, index, metadata)
-
-        # Memory + dedup + context
+        # Do NOT store embedding, metadata, or write FAISS/index file
+        # Only update memory and deduplication registry
         recent_context_memory[session_key].append(input_text)
         if len(recent_context_memory[session_key]) > 5:
             recent_context_memory[session_key] = recent_context_memory[session_key][-5:]

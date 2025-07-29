@@ -5,3 +5,9 @@ __pycache__/
 
 debug_vectors.json
 __pycache__/app.cpython-312.pyc
+
+session_titles.json
+research_doc_index.faiss
+research_doc_metadata.pkl
+
+./sessiondir/
